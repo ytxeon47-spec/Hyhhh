@@ -1,0 +1,106 @@
+name: Tiny10 Direct Native 3D KVM Setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-windows:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Pre-initialize Host KVM & Mesa 3D Stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-kvm net-tools libgl1-mesa-dri mesa-utils xvfb x11-utils
+          
+          # Настройка прав и инициализация модулей ускорения KVM
+          sudo chmod 666 /dev/kvm
+          sudo modprobe kvm || true
+          
+          # Проверка и подтягивание графических нод Linux-хоста
+          if [ -d /dev/dri ]; then
+            sudo chmod -R 666 /dev/dri
+          fi
+          
+          # Запуск виртуального буфера кадра для моментальной готовности 3D-контекста
+          Xvfb :99 -screen 0 1280x1024x24 &
+          export DISPLAY=:99
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Establish Tailscale Connection
+        run: |
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$GITHUB_RUN_ID
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4)
+              sleep 5
+              RETRIES=$((RETRIES+1))
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "Tailscale IP not assigned. Exiting."
+              exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: Run Windows Container with Pre-loaded 3D Acceleration
+        run: |
+          USERNAME="MXDEV"
+          
+          echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
+
+          DRI_ARGS=""
+          if [ -d /dev/dri ]; then
+            DRI_ARGS="--device=/dev/dri"
+          fi
+
+          docker run -d --name windows \
+            -e VERSION="tiny10" \
+            -e USERNAME="$USERNAME" \
+            -e AUTOLOGIN="Y" \
+            -e CPU_CORES="4" \
+            -e RAM_SIZE="12G" \
+            -e DISK_SIZE="256G" \
+            -e VGA="virtio-gl" \
+            -e FAST="Y" \
+            -p 8006:8006 \
+            -p 3389:3389 \
+            --device=/dev/kvm \
+            --device=/dev/net/tun \
+            $DRI_ARGS \
+            --cap-add NET_ADMIN \
+            --stop-timeout 120 \
+            docker.io/dockurr/windows
+
+      - name: Maintain Connection
+        run: |
+          echo -e "\n======================================================="
+          echo " This session is brought to you by MX DEV!"
+          echo " Subscribe to our Telegram channel for more methods:"
+          echo " https://t.me/mxdevrdp"
+          echo -e "=======================================================\n"
+          
+          echo -e "\n=== TINY10 NATIVE 3D KVM CONNECT INFO ==="
+          echo "Direct Web noVNC: http://$TAILSCALE_IP:8006"
+          echo "RDP Address:      $TAILSCALE_IP:3389"
+          echo "-------------------------------------------------------"
+          echo "Username:         $RDP_USER"
+          echo "Autologin:        ENABLED (No Password Required)"
+          echo "Resources:        4 CPU Cores | 12 GB RAM"
+          echo "System Disk:      256GB (Single Drive)"
+          echo "Hardware Accel:   KVM Core Acceleration"
+          echo "3D/Lighting:      VirtIO-GL + Linux Mesa Stack"
+          echo "=======================================================\n"
+          
+          while true; do
+              echo "[$(date)] Tiny10 3D Active - MX DEV (https://t.me/mxdevrdp)"
+              sleep 300
+          done
+
