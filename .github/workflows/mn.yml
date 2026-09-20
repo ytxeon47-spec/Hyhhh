@@ -1,0 +1,120 @@
+name: Tiny10 Direct 3D Drivers & KVM Setup
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-windows:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 1. Download & Install Linux Mesa 3D Stack
+        run: |
+          echo "=== [STEP 1/3] Fetching Linux VirGL & Mesa 3D Packages ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-kvm \
+            net-tools \
+            libgl1-mesa-dri \
+            libglx-mesa0 \
+            mesa-va-drivers \
+            libvirglrenderer1 \
+            virgl-server \
+            mesa-utils \
+            curl \
+            wget
+          
+          echo "=== Initializing KVM & GPU Devices ==="
+          sudo chmod 666 /dev/kvm
+          sudo modprobe kvm || true
+          
+          if [ -d /dev/dri ]; then
+            sudo chmod -R 666 /dev/dri
+          fi
+
+      - name: 2. Directly Fetch Official Red Hat VirtIO 3D Drivers ISO
+        run: |
+          echo "=== [STEP 2/3] Downloading Red Hat VirtIO Drivers ISO for Windows ==="
+          mkdir -p ./drivers
+          # Прямое скачивание свежего выпуска официального диска драйверов Red Hat VirtIO
+          wget -q --show-progress -O ./drivers/virtio-win.iso \
+            https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso
+          
+          echo "VirtIO Drivers ISO size:"
+          ls -lh ./drivers/virtio-win.iso
+
+      - name: Install Tailscale Connection
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$GITHUB_RUN_ID
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4)
+              sleep 5
+              RETRIES=$((RETRIES+1))
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "Tailscale IP not assigned. Exiting."
+              exit 1
+          fi
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 3. Launch Windows Container with Mounted 3D Drivers & KVM
+        run: |
+          echo "=== [STEP 3/3] Starting Windows Container with Direct 3D VirGL Setup ==="
+          USERNAME="MXDEV"
+          echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
+
+          DRI_ARGS=""
+          if [ -d /dev/dri ]; then
+            DRI_ARGS="--device=/dev/dri"
+          fi
+
+          docker run -d --name windows \
+            -e VERSION="tiny10" \
+            -e USERNAME="$USERNAME" \
+            -e AUTOLOGIN="Y" \
+            -e CPU_CORES="4" \
+            -e RAM_SIZE="12G" \
+            -e DISK_SIZE="256G" \
+            -e VGA="virtio-gl" \
+            -e FAST="Y" \
+            -v $(pwd)/drivers/virtio-win.iso:/drivers/virtio-win.iso \
+            -p 8006:8006 \
+            -p 3389:3389 \
+            --device=/dev/kvm \
+            --device=/dev/net/tun \
+            $DRI_ARGS \
+            --cap-add NET_ADMIN \
+            --stop-timeout 120 \
+            docker.io/dockurr/windows
+
+      - name: Maintain Connection & Display Info
+        run: |
+          echo -e "\n======================================================="
+          echo " This session is brought to you by MX DEV!"
+          echo " Subscribe to our Telegram channel for more methods:"
+          echo " https://t.me/mxdevrdp"
+          echo -e "=======================================================\n"
+          
+          echo -e "\n=== TINY10 DIRECT 3D DRIVERS CONNECT INFO ==="
+          echo "Direct Web noVNC: http://$TAILSCALE_IP:8006"
+          echo "RDP Address:      $TAILSCALE_IP:3389"
+          echo "-------------------------------------------------------"
+          echo "Username:         $RDP_USER"
+          echo "Autologin:        ENABLED (No Password Required)"
+          echo "Resources:        4 CPU Cores | 12 GB RAM"
+          echo "System Disk:      256GB (Single Drive)"
+          echo "3D Drivers Source: Direct Fedora/RedHat virtio-win.iso"
+          echo "Render Engine:    VirtIO-GL + Linux VirGL Renderer"
+          echo "=======================================================\n"
+          
+          while true; do
+              echo "[$(date)] Tiny10 3D Active - MX DEV (https://t.me/mxdevrdp)"
+              sleep 300
+          done
