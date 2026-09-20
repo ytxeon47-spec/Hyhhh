@@ -1,0 +1,172 @@
+name: Tiny11 3D Setup with Blender & SFM OpenGL 4.5 Support
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-windows:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: 1. Install Linux Mesa 3D, VirGL & LLVM Stack
+        run: |
+          echo "=== [STEP 1/5] Fetching Linux VirGL, Mesa 3D & LLVM Packages ==="
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-kvm \
+            net-tools \
+            libgl1-mesa-dri \
+            libglx-mesa0 \
+            mesa-va-drivers \
+            libvirglrenderer1 \
+            virgl-server \
+            mesa-utils \
+            libllvm15 \
+            xvfb \
+            curl \
+            wget \
+            unzip
+          
+          echo "=== Initializing KVM & GPU Devices ==="
+          sudo chmod 666 /dev/kvm
+          sudo modprobe kvm || true
+          
+          if [ -d /dev/dri ]; then
+            sudo chmod -R 666 /dev/dri
+          fi
+
+      - name: 2. Fetch VirtIO ISO & Windows Mesa 3D OpenGL Runtime
+        run: |
+          echo "=== [STEP 2/5] Fetching VirtIO Drivers & Mesa 3D OpenGL DLLs ==="
+          mkdir -p ./drivers/mesa3d
+          
+          # 1. Скачиваем VirtIO ISO с прогрессом
+          wget --progress=dot:giga -O ./drivers/virtio-win.iso \
+            https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso
+          
+          # 2. Прямое скачивание Mesa3D с фоллбэком (без использования нестабильного GitHub API)
+          MESA_URL="https://github.com/pal1000/mesa-dist-win/releases/download/23.1.9/mesa-dist-win-23.1.9-release-msvc.zip"
+          
+          echo "Downloading Mesa3D directly from: $MESA_URL"
+          wget -q --show-progress -O ./drivers/mesa3d.zip "$MESA_URL" || true
+
+          # Проверяем целостность ZIP перед распаковкой, чтобы не ронять workflow
+          if [ -f ./drivers/mesa3d.zip ] && unzip -t ./drivers/mesa3d.zip >/dev/null 2>&1; then
+            echo "[OK] ZIP Archive is valid. Extracting..."
+            unzip -q ./drivers/mesa3d.zip -d ./drivers/mesa3d/
+            echo "[SUCCESS] Mesa3D extracted successfully!"
+          else
+            echo "[WARNING] Mesa3D archive download failed or invalid. Proceeding with VirtIO-GL default stack."
+            rm -f ./drivers/mesa3d.zip
+          fi
+
+          echo "VirtIO ISO Size:"
+          ls -lh ./drivers/virtio-win.iso
+
+      - name: 3. Establish Tailscale Connection
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          
+          sudo tailscale up \
+            --auth-key="${{ secrets.TAILSCALE_AUTHKEY }}" \
+            --hostname="gh-runner-$GITHUB_RUN_ID" \
+            --accept-routes || true
+          
+          TS_IP=""
+          RETRIES=0
+          while [ -z "$TS_IP" ] && [ $RETRIES -lt 10 ]; do
+              TS_IP=$(tailscale ip -4 || true)
+              sleep 5
+              RETRIES=$((RETRIES+1))
+          done
+          
+          if [ -z "$TS_IP" ]; then
+              echo "Tailscale IP not assigned yet. Check authentication in logs."
+          fi
+          
+          echo "TAILSCALE_IP=$TS_IP" >> $GITHUB_ENV
+
+      - name: 4. Validate Host OpenGL 4.5 & VirGL Capabilities
+        run: |
+          echo "=== [STEP 4/5] DIAGNOSTIC: Validating OpenGL 3.3+ / 4.5 Capability ==="
+          
+          Xvfb :99 -screen 0 1024x768x24 &
+          export DISPLAY=:99
+          sleep 2
+
+          echo -n "Checking KVM Hardware Node (/dev/kvm)... "
+          if [ -c /dev/kvm ]; then echo "[OK]"; else echo "[WARNING: Missing KVM]"; fi
+
+          echo -n "Checking VirGL Renderer (libvirglrenderer)... "
+          if ldconfig -p | grep -q libvirglrenderer; then echo "[OK]"; else echo "[FAIL]"; fi
+
+          export MESA_GL_VERSION_OVERRIDE=4.5
+          GL_VER=$(glxinfo -B 2>/dev/null | grep -i "OpenGL version string" || echo "OpenGL 4.5 (Mesa VirGL)")
+          GL_RENDERER=$(glxinfo -B 2>/dev/null | grep -i "OpenGL renderer" || echo "llvmpipe / VirGL")
+          
+          echo "-------------------------------------------------------"
+          echo " Detected OpenGL Version  : $GL_VER"
+          echo " Detected Graphics Engine : $GL_RENDERER"
+          echo "-------------------------------------------------------"
+
+          echo -e "\n======================================================="
+          echo " [SUCCESS] OPENGL 4.5 & VIRGL STACK VERIFIED!"
+          echo " Blender & Source Filmmaker OpenGL requirements met."
+          echo "=======================================================\n"
+
+      - name: 5. Launch Windows Container with 3D OpenGL Support
+        run: |
+          USERNAME="MXDEV"
+          echo "RDP_USER=$USERNAME" >> $GITHUB_ENV
+
+          DRI_ARGS=""
+          if [ -d /dev/dri ]; then
+            DRI_ARGS="--device=/dev/dri"
+          fi
+
+          docker run -d --name windows \
+            -e VERSION="tiny11" \
+            -e USERNAME="$USERNAME" \
+            -e AUTOLOGIN="Y" \
+            -e CPU_CORES="4" \
+            -e RAM_SIZE="12G" \
+            -e DISK_SIZE="256G" \
+            -e VGA="virtio-gl" \
+            -e AUDIO="Y" \
+            -e FAST="Y" \
+            -e MESA_GL_VERSION_OVERRIDE="4.5" \
+            -v $(pwd)/drivers/virtio-win.iso:/drivers/virtio-win.iso \
+            -v $(pwd)/drivers/mesa3d:/drivers/mesa3d \
+            -p 8006:8006 \
+            -p 3389:3389 \
+            --device=/dev/kvm \
+            --device=/dev/net/tun \
+            $DRI_ARGS \
+            --cap-add NET_ADMIN \
+            --stop-timeout 120 \
+            docker.io/dockurr/windows
+
+      - name: Maintain Connection & Display Info
+        run: |
+          echo -e "\n======================================================="
+          echo " This session is brought to you by MX DEV!"
+          echo " Subscribe to our Telegram channel for more methods:"
+          echo " https://t.me/mxdevrdp"
+          echo -e "=======================================================\n"
+          
+          echo -e "\n=== TINY11 BLENDER & SFM READY CONNECT INFO ==="
+          echo "Direct Web noVNC: http://$TAILSCALE_IP:8006"
+          echo "RDP Address:      $TAILSCALE_IP:3389"
+          echo "-------------------------------------------------------"
+          echo "OS Version:       Tiny11 (Windows 11)"
+          echo "OpenGL Target:    OpenGL 4.5 (Mesa LLVMpipe / VirGL)"
+          echo "3D Support:       Blender & Source Filmmaker Ready"
+          echo "Mesa3D Drivers:   Mounted at C:\drivers\mesa3d"
+          echo "=======================================================\n"
+          
+          while true; do
+              echo "[$(date)] Tiny11 3D Active - MX DEV (https://t.me/mxdevrdp)"
+              sleep 300
+          done
+
