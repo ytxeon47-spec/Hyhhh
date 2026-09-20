@@ -39,20 +39,22 @@ jobs:
       - name: 2. Fetch VirtIO ISO & Windows Mesa 3D OpenGL Runtime
         run: |
           echo "=== [STEP 2/5] Fetching VirtIO Drivers & Mesa 3D OpenGL DLLs for Blender ==="
-          mkdir -p ./drivers
+          mkdir -p ./drivers/mesa3d
           
-          # 1. Скачиваем официальный VirtIO ISO
+          # 1. Скачиваем VirtIO ISO с аккуратным прогрессом
           wget --progress=dot:giga -O ./drivers/virtio-win.iso \
             https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/latest-virtio/virtio-win.iso
           
-          # 2. Скачиваем готовый пакет Mesa3D OpenGL for Windows (для устранения ошибки Blender)
-          mkdir -p ./drivers/mesa3d
-          wget --progress=dot:giga -O ./drivers/mesa3d.zip \
-            https://github.com/pal1000/mesa-dist-win/releases/download/23.1.9/mesa3d-23.1.9-release-msvc.zip || true
-            
-          if [ -f ./drivers/mesa3d.zip ]; then
+          # 2. Динамически получаем актуальную ссылку на Mesa3D
+          MESA_URL=$(curl -s https://api.github.com/repos/pal1000/mesa-dist-win/releases/latest | grep "browser_download_url" | grep "release-msvc.zip" | head -n 1 | cut -d '"' -f 4)
+          
+          if [ -n "$MESA_URL" ]; then
+            echo "Downloading latest Mesa3D from: $MESA_URL"
+            wget --progress=dot:giga -O ./drivers/mesa3d.zip "$MESA_URL"
             unzip -q ./drivers/mesa3d.zip -d ./drivers/mesa3d/
-            echo "[OK] Mesa3D Windows OpenGL Runtime downloaded successfully!"
+            echo "[OK] Mesa3D Windows OpenGL Runtime extracted successfully!"
+          else
+            echo "[WARNING] Could not resolve Mesa3D download URL, proceeding with VirtIO-GL default."
           fi
 
           echo "VirtIO ISO Size:"
@@ -95,7 +97,6 @@ jobs:
           echo -n "Checking VirGL Renderer (libvirglrenderer)... "
           if ldconfig -p | grep -q libvirglrenderer; then echo "[OK]"; else echo "[FAIL]"; fi
 
-          # Проверка поддерживаемой версии OpenGL
           export MESA_GL_VERSION_OVERRIDE=4.5
           GL_VER=$(glxinfo -B 2>/dev/null | grep -i "OpenGL version string" || echo "OpenGL 4.5 (Mesa VirGL)")
           GL_RENDERER=$(glxinfo -B 2>/dev/null | grep -i "OpenGL renderer" || echo "llvmpipe / VirGL")
